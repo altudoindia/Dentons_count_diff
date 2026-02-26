@@ -48,6 +48,22 @@ export async function GET(request: Request) {
   const batchSize = Math.min(parseInt(searchParams.get('batchSize') || '100'), 200)
   const maxPages = Math.min(parseInt(searchParams.get('maxPages') || '150'), 300)
 
+  const proxyBase = process.env.DENTONS_PROXY_URL
+  if (proxyBase) {
+    try {
+      const proxyUrl = `${proxyBase.replace(/\/$/, '')}/api/people/compare?${searchParams.toString()}`
+      const res = await fetch(proxyUrl, { cache: 'no-store', signal: AbortSignal.timeout(120_000), headers: { 'ngrok-skip-browser-warning': 'true' } })
+      const data = await res.json()
+      return NextResponse.json(data, { status: res.status })
+    } catch (err) {
+      console.error('Proxy fetch failed:', err)
+      return NextResponse.json(
+        { error: 'Comparison failed', message: err instanceof Error ? err.message : 'Proxy unreachable' },
+        { status: 502 }
+      )
+    }
+  }
+
   try {
     const [nacd1First, eucd1First] = await Promise.all([
       fetchPage(SERVERS.nacd1, 1, 1),

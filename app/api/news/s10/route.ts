@@ -30,6 +30,22 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: `Unknown server: ${server}` }, { status: 400 })
   }
 
+  const proxyBase = process.env.DENTONS_PROXY_URL
+  if (proxyBase) {
+    try {
+      const proxyUrl = `${proxyBase.replace(/\/$/, '')}/api/news/s10?${searchParams.toString()}`
+      const res = await fetch(proxyUrl, { cache: 'no-store', signal: AbortSignal.timeout(25_000), headers: { 'ngrok-skip-browser-warning': 'true' } })
+      const data = await res.json()
+      return NextResponse.json(data, { status: res.status })
+    } catch (err) {
+      console.error('Proxy fetch failed:', err)
+      return NextResponse.json(
+        { error: `Failed to fetch from ${server}`, message: err instanceof Error ? err.message : 'Proxy unreachable' },
+        { status: 502 }
+      )
+    }
+  }
+
   const apiUrl = `${endpoint}?data=${data}&contextLanguage=${contextLanguage}&contextSite=${contextSite}&pageNumber=${pageNumber}&pageSize=${pageSize}`
 
   try {

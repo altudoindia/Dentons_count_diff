@@ -52,6 +52,24 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: `Unknown service: ${service}. Use: insights, people, news` }, { status: 400 })
   }
 
+  // When deployed on Vercel (no VPN), forward to a proxy that has VPN access to Dentons URLs
+  const proxyBase = process.env.DENTONS_PROXY_URL
+  if (proxyBase) {
+    try {
+      const proxyUrl = `${proxyBase.replace(/\/$/, '')}/api/server-proxy?${searchParams.toString()}`
+      const res = await fetch(proxyUrl, { cache: 'no-store', signal: AbortSignal.timeout(FETCH_TIMEOUT + 5_000), headers: { 'ngrok-skip-browser-warning': 'true' } })
+      const data = await res.json()
+      const headers: HeadersInit = res.ok ? { 'Cache-Control': 'public, s-maxage=30, stale-while-revalidate=60' } : {}
+      return NextResponse.json(data, { status: res.status, headers })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unknown error'
+      return NextResponse.json(
+        { error: 'Failed to fetch', message: msg.includes('abort') ? `Timeout` : msg },
+        { status: 502 }
+      )
+    }
+  }
+
   const apiUrl = `https://${domain}${servicePath}?data=${data}&contextLanguage=${contextLanguage}&contextSite=${contextSite}&pageNumber=${pageNumber}&pageSize=${pageSize}`
 
   const controller = new AbortController()

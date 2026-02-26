@@ -54,6 +54,22 @@ export async function GET(request: Request) {
 
   const hasSearch = keywords || names || alpha
 
+  const proxyBase = process.env.DENTONS_PROXY_URL
+  if (proxyBase) {
+    try {
+      const proxyUrl = `${proxyBase.replace(/\/$/, '')}/api/people?${searchParams.toString()}`
+      const res = await fetch(proxyUrl, { cache: 'no-store', signal: AbortSignal.timeout(25_000), headers: { 'ngrok-skip-browser-warning': 'true' } })
+      const data = await res.json()
+      return NextResponse.json(data, { status: res.status })
+    } catch (err) {
+      console.error('Proxy fetch failed:', err)
+      return NextResponse.json(
+        { error: 'Failed to fetch from Dentons API', message: err instanceof Error ? err.message : 'Proxy unreachable' },
+        { status: 502 }
+      )
+    }
+  }
+
   try {
     let apiUrl: string
 

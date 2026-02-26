@@ -61,6 +61,26 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: 'Invalid domain' }, { status: 400 })
   }
 
+  // When deployed on Vercel (no VPN), forward to a proxy that has VPN access to Dentons URLs
+  const proxyBase = process.env.DENTONS_PROXY_URL
+  if (proxyBase) {
+    try {
+      const proxyUrl = `${proxyBase.replace(/\/$/, '')}/api/batch-counts?${searchParams.toString()}`
+      const res = await fetch(proxyUrl, { cache: 'no-store', signal: AbortSignal.timeout(25_000), headers: { 'ngrok-skip-browser-warning': 'true' } })
+      const data = await res.json()
+      return NextResponse.json(data, {
+        status: res.status,
+        headers: { 'Cache-Control': 'no-store, no-cache, must-revalidate' },
+      })
+    } catch (err) {
+      console.error('Proxy fetch failed:', err)
+      return NextResponse.json(
+        { error: 'Proxy unreachable', domain, insights: { count: null, error: 'Proxy unreachable' }, people: { count: null, error: 'Proxy unreachable' }, news: { count: null, error: 'Proxy unreachable' } },
+        { status: 502 }
+      )
+    }
+  }
+
   const results = await Promise.all(SERVICES.map(svc => fetchCount(domain, svc)))
 
   const counts: Record<string, { count: number | null; error: string | null }> = {}

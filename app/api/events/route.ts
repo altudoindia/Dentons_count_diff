@@ -62,6 +62,25 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: `Unknown type: ${type}. Use: upcoming, past` }, { status: 400 })
   }
 
+  const proxyBase = process.env.DENTONS_PROXY_URL
+  if (proxyBase) {
+    try {
+      const proxyUrl = `${proxyBase.replace(/\/$/, '')}/api/events?${searchParams.toString()}`
+      const res = await fetch(proxyUrl, { cache: 'no-store', signal: AbortSignal.timeout(FETCH_TIMEOUT + 5_000), headers: { 'ngrok-skip-browser-warning': 'true' } })
+      const data = await res.json()
+      return NextResponse.json(data, {
+        status: res.status,
+        headers: { 'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=120' },
+      })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unknown error'
+      return NextResponse.json(
+        { error: 'Failed to fetch events', message: msg.includes('abort') ? `Timeout` : msg },
+        { status: 502 }
+      )
+    }
+  }
+
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT)
 

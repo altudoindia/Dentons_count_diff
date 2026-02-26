@@ -178,6 +178,25 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: `Unknown service: ${service}` }, { status: 400 })
   }
 
+  const proxyBase = process.env.DENTONS_PROXY_URL
+  if (proxyBase) {
+    try {
+      const proxyUrl = `${proxyBase.replace(/\/$/, '')}/api/server-compare?${searchParams.toString()}`
+      const res = await fetch(proxyUrl, { cache: 'no-store', signal: AbortSignal.timeout(120_000), headers: { 'ngrok-skip-browser-warning': 'true' } })
+      const data = await res.json()
+      return NextResponse.json(data, {
+        status: res.status,
+        headers: { 'Cache-Control': 'no-store, no-cache, must-revalidate' },
+      })
+    } catch (err) {
+      console.error('Proxy fetch failed:', err)
+      return NextResponse.json(
+        { error: 'Comparison failed', message: err instanceof Error ? err.message : 'Proxy unreachable' },
+        { status: 502 }
+      )
+    }
+  }
+
   const url1 = `https://${domain1}${servicePath}`
   const url2 = `https://${domain2}${servicePath}`
 
