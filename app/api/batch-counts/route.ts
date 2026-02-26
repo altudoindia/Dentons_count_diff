@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server'
 import { gunzipSync } from 'zlib'
 
+export const dynamic = 'force-dynamic'
+
 const DENTONS_HEADERS = {
   'Accept': 'application/json, text/plain, */*',
   'Accept-Encoding': 'gzip, deflate, br',
@@ -81,14 +83,19 @@ export async function GET(request: Request) {
     }
   }
 
-  const results = await Promise.all(SERVICES.map(svc => fetchCount(domain, svc)))
+  // Fetch sequentially and assign directly to the correct key so insights/news can never get swapped
+  const insightsResult = await fetchCount(domain, 'insights')
+  const peopleResult = await fetchCount(domain, 'people')
+  const newsResult = await fetchCount(domain, 'news')
 
-  const counts: Record<string, { count: number | null; error: string | null }> = {}
-  for (const r of results) {
-    counts[r.service] = { count: r.count, error: r.error }
+  const payload = {
+    domain,
+    insights: { count: insightsResult.count, error: insightsResult.error },
+    people: { count: peopleResult.count, error: peopleResult.error },
+    news: { count: newsResult.count, error: newsResult.error },
   }
 
-  return NextResponse.json({ domain, ...counts }, {
+  return NextResponse.json(payload, {
     headers: { 'Cache-Control': 'no-store, no-cache, must-revalidate' },
   })
 }

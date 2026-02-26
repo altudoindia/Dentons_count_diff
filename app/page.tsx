@@ -1,686 +1,663 @@
 'use client'
 
-import React, { useEffect, useState, useCallback, useMemo, useRef, FormEvent, memo } from 'react'
-import Image from 'next/image'
-import { Person } from '@/types'
+import { useState, useCallback, useRef, memo } from 'react'
 
-const PAGE_SIZE = 20
-const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('')
+const DOMAINS = [
+  'www.dentons.com',
+  's10-www.dentons.com',
+  'www.preview.dentons.com',
+  's10-nacd1.dentons.com',
+  's10-eucd1.dentons.com',
+  's10-nacd2.dentons.com',
+  's10-pg.dentons.com',
+  'uat-www.dentons.com',
+  'uat-www.preview.dentons.com',
+  'uat-nacd1.dentons.com',
+  'uat-eucd1.dentons.com',
+]
 
-interface ActiveFilter {
-  type: 'keyword' | 'alphabet' | 'name'
-  label: string
+const SERVICES = ['insights', 'people', 'news'] as const
+type Service = typeof SERVICES[number]
+
+interface CountData {
+  count: number | null
+  loading: boolean
+  error: string | null
 }
 
-function encodeKeyword(keyword: string): string {
-  const encoder = new TextEncoder()
-  const uint8Array = encoder.encode(keyword)
-  const binaryString = String.fromCharCode.apply(null, Array.from(uint8Array))
-  const base64 = btoa(binaryString)
-  return encodeURI(base64)
+interface DiffItem {
+  heading?: string
+  name?: string
+  jobTitle?: string
+  office?: string
+  date?: string
+  link: string
+  title?: string
 }
 
-function updateBrowserUrl(params: { keywords?: string; names?: string; letter?: string }) {
-  const url = new URL(window.location.href)
-  url.search = ''
-
-  if (params.keywords) url.searchParams.set('Keywords', params.keywords)
-  if (params.names) url.searchParams.set('NAMES', params.names)
-  if (params.letter) url.searchParams.set('letter', params.letter)
-
-  window.history.replaceState(null, '', url.pathname + url.search)
+interface CompareResult {
+  total1: number
+  total2: number
+  difference: number
+  onlyIn1: DiffItem[]
+  onlyIn2: DiffItem[]
+  duplicateHint?: 'left' | 'right' | null
+  pagesScanned: number
+  itemsScanned: number
+  complete: boolean
 }
 
-function readUrlParams(): { keywords: string; firstName: string; lastName: string; letter: string } {
-  if (typeof window === 'undefined') return { keywords: '', firstName: '', lastName: '', letter: '' }
-
-  const params = new URLSearchParams(window.location.search)
-  const keywords = params.get('Keywords') || ''
-  const names = params.get('NAMES') || ''
-  const letter = params.get('letter') || ''
-
-  let firstName = ''
-  let lastName = ''
-  if (names) {
-    const parts = names.split(',')
-    firstName = parts[0] || ''
-    lastName = parts[1] || ''
-  }
-
-  return { keywords, firstName, lastName, letter }
+interface ServiceState {
+  left: CountData
+  right: CountData
+  compare: CompareResult | null
+  comparing: boolean
+  compareError: string | null
 }
 
-export default function Home() {
-  const [people, setPeople] = useState<Person[]>([])
-  const [loading, setLoading] = useState(true)
-  const [loadingMore, setLoadingMore] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [page, setPage] = useState(1)
-  const [totalResults, setTotalResults] = useState(0)
-  const [hasMore, setHasMore] = useState(true)
+interface EventItem { title: string; link: string; date: string }
+interface EventsData {
+  count: number | null
+  events: EventItem[]
+  loading: boolean
+  error: string | null
+}
 
-  const [keyword, setKeyword] = useState('')
-  const [appliedKeyword, setAppliedKeyword] = useState('')
-  const [activeLetter, setActiveLetter] = useState('')
-  const [firstName, setFirstName] = useState('')
-  const [lastName, setLastName] = useState('')
-  const [appliedFirstName, setAppliedFirstName] = useState('')
-  const [appliedLastName, setAppliedLastName] = useState('')
-  const [nameFilterOpen, setNameFilterOpen] = useState(true)
-  const [sidebarOpen, setSidebarOpen] = useState(false)
-  const [expandedIndex, setExpandedIndex] = useState<number | null>(null)
-  const initializedRef = useRef(false)
+const initialCountData: CountData = { count: null, loading: false, error: null }
+const initialServiceState: ServiceState = {
+  left: { ...initialCountData },
+  right: { ...initialCountData },
+  compare: null,
+  comparing: false,
+  compareError: null,
+}
 
-  const buildApiUrl = useCallback((pageNum: number, opts?: { kw?: string; fn?: string; ln?: string; letter?: string }) => {
-    const kw = opts?.kw ?? appliedKeyword
-    const fn = opts?.fn ?? appliedFirstName
-    const ln = opts?.ln ?? appliedLastName
-    const letter = opts?.letter ?? activeLetter
+interface CompareStateOnly {
+  compare: CompareResult | null
+  comparing: boolean
+  compareError: string | null
+}
+const initialCompareState: CompareStateOnly = { compare: null, comparing: false, compareError: null }
+function createInitialServiceCompare(): Record<Service, CompareStateOnly> {
+  return { insights: { ...initialCompareState }, people: { ...initialCompareState }, news: { ...initialCompareState } }
+}
 
-    const params = new URLSearchParams({
-      contextLanguage: 'en',
-      contextSite: 'dentons',
-      pageNumber: String(pageNum),
-      pageSize: String(PAGE_SIZE),
-    })
+const initialEventsData: EventsData = { count: null, events: [], loading: false, error: null }
 
-    if (kw) params.set('keywords', encodeKeyword(kw))
+const Spinner = memo(function Spinner({ className = 'h-6 w-6' }: { className?: string }) {
+  return (
+    <svg className={`animate-spin text-[#7B1FA2] ${className}`} fill="none" viewBox="0 0 24 24">
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+    </svg>
+  )
+})
 
-    const nameParts = [fn, ln].filter(Boolean).join(',')
-    if (nameParts) params.set('names', nameParts)
+const SERVICE_META: Record<Service, { label: string; iconPath: string; color: string }> = {
+  insights: {
+    label: 'Insights',
+    color: 'bg-purple-100 text-[#7B1FA2]',
+    iconPath: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z',
+  },
+  people: {
+    label: 'People / Bio',
+    color: 'bg-blue-100 text-blue-600',
+    iconPath: 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z',
+  },
+  news: {
+    label: 'News',
+    color: 'bg-emerald-100 text-emerald-600',
+    iconPath: 'M19 20H5a2 2 0 01-2-2V6a2 2 0 012-2h10a2 2 0 012 2v1m2 13a2 2 0 01-2-2V7m2 13a2 2 0 002-2V9a2 2 0 00-2-2h-2m-4-3H9M7 16h6M7 8h6v4H7V8z',
+  },
+}
 
-    if (letter) params.set('alpha', letter)
+function normalizePath(link: string): string {
+  return link.replace(/https?:\/\/[^/]+/, '')
+}
 
-    return `/api/people?${params.toString()}`
-  }, [appliedKeyword, appliedFirstName, appliedLastName, activeLetter])
+export default function HomePage() {
+  const [leftDomain, setLeftDomain] = useState(DOMAINS[0])
+  const [rightDomain, setRightDomain] = useState(DOMAINS[3])
+  const [started, setStarted] = useState(false)
 
-  const syncUrl = useCallback((kw: string, fn: string, ln: string, letter: string) => {
-    const names = [fn, ln].filter(Boolean).join(',')
-    updateBrowserUrl({ keywords: kw, names, letter })
+  // One state per slot so Insights/News counts can never get mixed (e.g. EUCD news count in insights)
+  const [insightsLeft, setInsightsLeft] = useState<CountData>({ ...initialCountData })
+  const [insightsRight, setInsightsRight] = useState<CountData>({ ...initialCountData })
+  const [peopleLeft, setPeopleLeft] = useState<CountData>({ ...initialCountData })
+  const [peopleRight, setPeopleRight] = useState<CountData>({ ...initialCountData })
+  const [newsLeft, setNewsLeft] = useState<CountData>({ ...initialCountData })
+  const [newsRight, setNewsRight] = useState<CountData>({ ...initialCountData })
+  const [serviceCompare, setServiceCompare] = useState<Record<Service, CompareStateOnly>>(createInitialServiceCompare)
+
+  const [upcomingLeft, setUpcomingLeft] = useState<EventsData>({ ...initialEventsData })
+  const [upcomingRight, setUpcomingRight] = useState<EventsData>({ ...initialEventsData })
+  const [pastLeft, setPastLeft] = useState<EventsData>({ ...initialEventsData })
+  const [pastRight, setPastRight] = useState<EventsData>({ ...initialEventsData })
+  const compareRunIdRef = useRef(0)
+
+  const updateServiceCompare = useCallback((svc: Service, patch: Partial<CompareStateOnly>) => {
+    setServiceCompare(prev => ({ ...prev, [svc]: { ...prev[svc], ...patch } }))
   }, [])
 
-  const fetchPeople = useCallback(async (pageNum: number, append: boolean, url: string) => {
+  const fetchBatchCounts = useCallback(async (domain: string, side: 'left' | 'right', runId: number) => {
+    const loadingData: CountData = { count: null, loading: true, error: null }
+    if (side === 'left') {
+      setInsightsLeft(loadingData)
+      setPeopleLeft(loadingData)
+      setNewsLeft(loadingData)
+    } else {
+      setInsightsRight(loadingData)
+      setPeopleRight(loadingData)
+      setNewsRight(loadingData)
+    }
+
     try {
-      if (append) setLoadingMore(true)
-      else { setLoading(true); setError(null) }
+      const url = `/api/batch-counts?domain=${encodeURIComponent(domain)}&_=${runId}`
+      const res = await fetch(url, { cache: 'no-store', headers: { Pragma: 'no-cache', 'Cache-Control': 'no-cache' } })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const json = await res.json()
 
-      const response = await fetch(url)
-      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`)
-      const data = await response.json()
-      if (data.error) { setError(data.message || 'Failed to fetch'); return }
+      if (compareRunIdRef.current !== runId) return
+      if (json.domain !== domain) return
 
-      if (data.persons && Array.isArray(data.persons)) {
-        setPeople(prev => append ? [...prev, ...data.persons] : data.persons)
-        if (data.totalResult != null) setTotalResults(data.totalResult)
-        setHasMore(data.persons.length === PAGE_SIZE)
+      // Read each key once into its own variable so no mix-up possible
+      const insightsCount = json.insights?.count ?? null
+      const peopleCount = json.people?.count ?? null
+      const newsCount = json.news?.count ?? null
+      const insightsErr = json.insights?.error ?? null
+      const peopleErr = json.people?.error ?? null
+      const newsErr = json.news?.error ?? null
+
+      const insightsData: CountData = { count: insightsCount, loading: false, error: insightsErr }
+      const peopleData: CountData = { count: peopleCount, loading: false, error: peopleErr }
+      const newsData: CountData = { count: newsCount, loading: false, error: newsErr }
+
+      if (side === 'left') {
+        setInsightsLeft(insightsData)
+        setPeopleLeft(peopleData)
+        setNewsLeft(newsData)
       } else {
-        if (!append) setPeople([])
-        setTotalResults(0)
-        setHasMore(false)
+        setInsightsRight(insightsData)
+        setPeopleRight(peopleData)
+        setNewsRight(newsData)
       }
     } catch (err) {
-      setError('Failed to fetch: ' + (err as Error).message)
-    } finally {
-      setLoading(false)
-      setLoadingMore(false)
+      if (compareRunIdRef.current !== runId) return
+      const msg = (err as Error).message
+      const errData: CountData = { count: null, loading: false, error: msg }
+      if (side === 'left') {
+        setInsightsLeft(errData)
+        setPeopleLeft(errData)
+        setNewsLeft(errData)
+      } else {
+        setInsightsRight(errData)
+        setPeopleRight(errData)
+        setNewsRight(errData)
+      }
     }
   }, [])
 
-  useEffect(() => {
-    if (initializedRef.current) return
-    initializedRef.current = true
-
-    const urlParams = readUrlParams()
-
-    if (urlParams.keywords) {
-      setKeyword(urlParams.keywords)
-      setAppliedKeyword(urlParams.keywords)
+  const fetchEvents = useCallback(async (domain: string, type: string, setter: (d: EventsData) => void) => {
+    setter({ count: null, events: [], loading: true, error: null })
+    try {
+      const url = `/api/events?domain=${domain}&type=${type}&_=${Date.now()}`
+      const res = await fetch(url, { cache: 'no-store', headers: { Pragma: 'no-cache', 'Cache-Control': 'no-cache' } })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const json = await res.json()
+      if (json.error) throw new Error(json.message)
+      setter({ count: json.totalResult ?? 0, events: json.events ?? [], loading: false, error: null })
+    } catch (err) {
+      setter({ count: null, events: [], loading: false, error: (err as Error).message })
     }
-    if (urlParams.firstName) {
-      setFirstName(urlParams.firstName)
-      setAppliedFirstName(urlParams.firstName)
+  }, [])
+
+  const runCompare = useCallback(async (service: Service) => {
+    updateServiceCompare(service, { comparing: true, compareError: null, compare: null })
+    try {
+      const url = `/api/server-compare?domain1=${encodeURIComponent(leftDomain)}&domain2=${encodeURIComponent(rightDomain)}&service=${service}&_=${Date.now()}`
+      const res = await fetch(url, { cache: 'no-store', headers: { Pragma: 'no-cache', 'Cache-Control': 'no-cache' } })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const json = await res.json()
+      if (json.error) throw new Error(json.message)
+      updateServiceCompare(service, { compare: json, comparing: false })
+    } catch (err) {
+      updateServiceCompare(service, { compareError: (err as Error).message, comparing: false })
     }
-    if (urlParams.lastName) {
-      setLastName(urlParams.lastName)
-      setAppliedLastName(urlParams.lastName)
-    }
-    if (urlParams.letter) {
-      setActiveLetter(urlParams.letter)
-    }
+  }, [leftDomain, rightDomain, updateServiceCompare])
 
-    const params = new URLSearchParams({
-      contextLanguage: 'en',
-      contextSite: 'dentons',
-      pageNumber: '1',
-      pageSize: String(PAGE_SIZE),
-    })
-    if (urlParams.keywords) params.set('keywords', encodeKeyword(urlParams.keywords))
-    const nameParts = [urlParams.firstName, urlParams.lastName].filter(Boolean).join(',')
-    if (nameParts) params.set('names', nameParts)
-    if (urlParams.letter) params.set('alpha', urlParams.letter)
+  const handleCompare = () => {
+    if (leftDomain === rightDomain) return
+    setStarted(true)
 
-    fetchPeople(1, false, `/api/people?${params.toString()}`)
-  }, [fetchPeople])
+    const reset: CountData = { ...initialCountData }
+    setInsightsLeft(reset)
+    setInsightsRight(reset)
+    setPeopleLeft(reset)
+    setPeopleRight(reset)
+    setNewsLeft(reset)
+    setNewsRight(reset)
+    setServiceCompare(createInitialServiceCompare())
+    setUpcomingLeft({ ...initialEventsData })
+    setUpcomingRight({ ...initialEventsData })
+    setPastLeft({ ...initialEventsData })
+    setPastRight({ ...initialEventsData })
 
-  const filteredPeople = people
+    compareRunIdRef.current = Date.now()
+    const runId = compareRunIdRef.current
+    ;(async () => {
+      await fetchBatchCounts(leftDomain, 'left', runId)
+      await fetchBatchCounts(rightDomain, 'right', runId)
+    })()
 
-  const activeFilters = useMemo(() => {
-    const filters: ActiveFilter[] = []
-    if (appliedKeyword) filters.push({ type: 'keyword', label: `Search: ${appliedKeyword}` })
-    if (activeLetter) filters.push({ type: 'alphabet', label: `Letter: ${activeLetter}` })
-    if (appliedFirstName || appliedLastName) {
-      const parts = [appliedFirstName, appliedLastName].filter(Boolean).join(', ')
-      filters.push({ type: 'name', label: `Name: ${parts}` })
-    }
-    return filters
-  }, [appliedKeyword, activeLetter, appliedFirstName, appliedLastName])
-
-  const doSearch = useCallback((kw: string, fn: string, ln: string, letter?: string) => {
-    const lt = letter ?? activeLetter
-    setPage(1)
-    setExpandedIndex(null)
-    const url = buildApiUrl(1, { kw, fn, ln, letter: lt })
-    fetchPeople(1, false, url)
-    syncUrl(kw, fn, ln, lt)
-  }, [buildApiUrl, fetchPeople, syncUrl, activeLetter])
-
-  const handleKeywordSearch = (e: FormEvent) => {
-    e.preventDefault()
-    setAppliedKeyword(keyword)
-    doSearch(keyword, appliedFirstName, appliedLastName)
+    fetchEvents(leftDomain, 'upcoming', setUpcomingLeft)
+    fetchEvents(rightDomain, 'upcoming', setUpcomingRight)
+    fetchEvents(leftDomain, 'past', setPastLeft)
+    fetchEvents(rightDomain, 'past', setPastRight)
   }
 
-  const handleAlphabetClick = (letter: string) => {
-    const newLetter = activeLetter === letter ? '' : letter
-    setActiveLetter(newLetter)
-    doSearch(appliedKeyword, appliedFirstName, appliedLastName, newLetter)
-  }
-
-  const handleNameSearch = (e: FormEvent) => {
-    e.preventDefault()
-    setAppliedFirstName(firstName)
-    setAppliedLastName(lastName)
-    doSearch(appliedKeyword, firstName, lastName)
-  }
-
-  const handleLoadMore = () => {
-    const nextPage = page + 1
-    setPage(nextPage)
-    fetchPeople(nextPage, true, buildApiUrl(nextPage))
-  }
-
-  const removeFilter = (filter: ActiveFilter) => {
-    if (filter.type === 'keyword') {
-      setKeyword(''); setAppliedKeyword('')
-      doSearch('', appliedFirstName, appliedLastName)
-    } else if (filter.type === 'alphabet') {
-      setActiveLetter('')
-      doSearch(appliedKeyword, appliedFirstName, appliedLastName, '')
-    } else if (filter.type === 'name') {
-      setFirstName(''); setLastName(''); setAppliedFirstName(''); setAppliedLastName('')
-      doSearch(appliedKeyword, '', '')
+  // Build per-service state from the 6 separate count states so ServiceCard API stays the same
+  const getServiceState = useCallback((svc: Service): ServiceState => {
+    const left = svc === 'insights' ? insightsLeft : svc === 'people' ? peopleLeft : newsLeft
+    const right = svc === 'insights' ? insightsRight : svc === 'people' ? peopleRight : newsRight
+    return {
+      left,
+      right,
+      compare: serviceCompare[svc].compare,
+      comparing: serviceCompare[svc].comparing,
+      compareError: serviceCompare[svc].compareError,
     }
+  }, [insightsLeft, insightsRight, peopleLeft, peopleRight, newsLeft, newsRight, serviceCompare])
+
+  const shortName = (domain: string) => {
+    const parts = domain.replace('.dentons.com', '').split('.')
+    return parts[parts.length - 1].toUpperCase()
   }
 
-  const clearAllFilters = () => {
-    setKeyword(''); setAppliedKeyword('')
-    setActiveLetter('')
-    setFirstName(''); setLastName(''); setAppliedFirstName(''); setAppliedLastName('')
-    setPage(1)
-    setExpandedIndex(null)
-    fetchPeople(1, false, `/api/people?contextLanguage=en&contextSite=dentons&pageNumber=1&pageSize=${PAGE_SIZE}`)
-    updateBrowserUrl({})
-  }
-
-  const sidebarContent = (
-    <>
-      {activeFilters.length > 0 && (
-        <div className="mb-6">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-semibold text-gray-700">Active filters</h3>
-            <button onClick={() => { clearAllFilters(); setSidebarOpen(false) }} className="text-xs text-[#7B1FA2] hover:underline">Clear all</button>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {activeFilters.map((filter, i) => (
-              <span key={i} className="inline-flex items-center gap-1 bg-[#7B1FA2] text-white text-xs px-3 py-1.5 rounded">
-                {filter.label}
-                <button onClick={() => removeFilter(filter)} className="ml-1 hover:opacity-80">
-                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </button>
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
-
-      <div className="mb-4">
-        <h3 className="text-sm font-semibold text-gray-700 mb-1">Additional filters</h3>
-        <p className="text-xs text-gray-500 mb-4">Select filters. Search results list will be updated automatically.</p>
-      </div>
-
-      <div className="border rounded-lg overflow-hidden">
-        <div className="w-full flex items-center justify-between px-4 py-3 bg-gray-50">
-          <span className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setNameFilterOpen(!nameFilterOpen)}
-              className={`w-5 h-5 rounded flex items-center justify-center text-white text-xs font-bold cursor-pointer hover:opacity-80 transition-opacity ${nameFilterOpen ? 'bg-[#7B1FA2]' : 'bg-gray-400'}`}
-            >
-              {nameFilterOpen ? '−' : '+'}
-            </button>
-            <span className="text-sm font-semibold text-[#7B1FA2]">Name</span>
-          </span>
-          {(firstName || lastName || appliedFirstName || appliedLastName) && (
-            <span
-              onClick={() => {
-                setFirstName(''); setLastName('')
-                if (appliedFirstName || appliedLastName) {
-                  setAppliedFirstName(''); setAppliedLastName('')
-                  doSearch(appliedKeyword, '', '')
-                }
-              }}
-              className="text-xs text-[#7B1FA2] hover:underline cursor-pointer"
-            >
-              Clear
-            </span>
-          )}
-        </div>
-
-        {nameFilterOpen && (
-          <form onSubmit={e => { handleNameSearch(e); setSidebarOpen(false) }} className="p-4 space-y-4">
-            <div>
-              <label className="block text-xs font-semibold text-gray-700 mb-1">First Name</label>
-              <div className="relative">
-                <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                </svg>
-                <input
-                  type="text"
-                  value={firstName}
-                  onChange={e => setFirstName(e.target.value)}
-                  placeholder="Start typing first name"
-                  className="w-full border border-gray-300 rounded pl-9 pr-8 py-2 text-sm focus:outline-none focus:border-[#7B1FA2] focus:ring-1 focus:ring-[#7B1FA2]"
-                />
-                {firstName && (
-                  <button type="button" onClick={() => setFirstName('')} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  </button>
-                )}
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-gray-700 mb-1">Last Name</label>
-              <div className="relative">
-                <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                </svg>
-                <input
-                  type="text"
-                  value={lastName}
-                  onChange={e => setLastName(e.target.value)}
-                  placeholder="Start typing last name"
-                  className="w-full border border-gray-300 rounded pl-9 pr-8 py-2 text-sm focus:outline-none focus:border-[#7B1FA2] focus:ring-1 focus:ring-[#7B1FA2]"
-                />
-                {lastName && (
-                  <button type="button" onClick={() => setLastName('')} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  </button>
-                )}
-              </div>
-            </div>
-
-            <button type="submit" className="w-full bg-[#7B1FA2] text-white text-sm font-medium py-2.5 rounded hover:bg-[#6A1B91] transition-colors">
-              Search
-            </button>
-          </form>
-        )}
-      </div>
-    </>
-  )
+  const leftLabel = shortName(leftDomain)
+  const rightLabel = shortName(rightDomain)
 
   return (
-    <div className="min-h-screen bg-white">
+    <div className="min-h-screen bg-gray-50">
       <header className="bg-[#1a1a2e] text-white">
-        <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8">
-          <nav className="py-2 text-xs text-gray-400">
-            <span>Home</span><span className="mx-1">&gt;</span><span>Our professionals</span>
-          </nav>
-          <h1 className="text-2xl sm:text-3xl font-light pb-4 sm:pb-6 italic font-serif">Our professionals</h1>
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+         
+          <h1 className="text-2xl sm:text-3xl font-light pb-4 sm:pb-6 italic font-serif">
+           Count Defferences
+          </h1>
         </div>
       </header>
 
-      {/* Top Keyword Search */}
-      <div className="bg-white border-b">
-        <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-3 sm:py-4">
-          <form onSubmit={handleKeywordSearch} className="flex">
-            <input
-              type="text"
-              value={keyword}
-              onChange={e => setKeyword(e.target.value)}
-              placeholder="Search by keyword: name, practice, office.."
-              className="flex-grow border border-gray-300 rounded-l px-3 sm:px-4 py-2.5 sm:py-3 text-sm focus:outline-none focus:border-[#7B1FA2] focus:ring-1 focus:ring-[#7B1FA2]"
-            />
-            <button type="submit" className="bg-[#7B1FA2] text-white px-4 sm:px-5 py-2.5 sm:py-3 rounded-r hover:bg-[#6A1B91] transition-colors">
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-              </svg>
+      <div className="bg-white border-b border-gray-200 sticky top-0 z-20">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-end gap-3 sm:gap-4">
+            <div className="flex-1 min-w-0">
+              <label className="block text-xs font-medium text-gray-500 mb-1">Left Server</label>
+              <select
+                value={leftDomain}
+                onChange={e => setLeftDomain(e.target.value)}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm bg-white focus:ring-2 focus:ring-[#7B1FA2] focus:border-[#7B1FA2] outline-none"
+              >
+                {DOMAINS.map(d => <option key={d} value={d}>https://{d}</option>)}
+              </select>
+            </div>
+            <div className="hidden sm:flex items-center justify-center pb-1">
+              <span className="text-gray-400 font-bold text-lg">vs</span>
+            </div>
+            <div className="flex-1 min-w-0">
+              <label className="block text-xs font-medium text-gray-500 mb-1">Right Server</label>
+              <select
+                value={rightDomain}
+                onChange={e => setRightDomain(e.target.value)}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm bg-white focus:ring-2 focus:ring-[#7B1FA2] focus:border-[#7B1FA2] outline-none"
+              >
+                {DOMAINS.map(d => <option key={d} value={d}>https://{d}</option>)}
+              </select>
+            </div>
+            <button
+              onClick={handleCompare}
+              disabled={leftDomain === rightDomain}
+              className="px-6 py-2.5 bg-[#7B1FA2] text-white rounded-lg text-sm font-medium hover:bg-[#6A1B9A] disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap"
+            >
+              Compare
             </button>
-          </form>
+          </div>
+          {leftDomain === rightDomain && (
+            <p className="text-xs text-amber-600 mt-2">Select two different servers to compare.</p>
+          )}
         </div>
       </div>
 
-      {/* Alphabet Bar */}
-      <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8">
-        <div className="overflow-x-auto scrollbar-hide -mx-3 px-3 sm:mx-0 sm:px-0">
-          <div className="flex items-center gap-0.5 py-2.5 sm:py-3 sm:justify-between min-w-max sm:min-w-0">
-            {ALPHABET.map(letter => (
-              <button
-                key={letter}
-                onClick={() => handleAlphabetClick(letter)}
-                className={`w-8 h-8 sm:w-9 sm:h-9 flex-shrink-0 flex items-center justify-center font-medium rounded transition-colors text-base sm:text-lg
-                  ${activeLetter === letter ? 'bg-[#7B1FA2] text-white' : 'text-gray-600 hover:text-[#7B1FA2] hover:bg-purple-50'}`}
-              >
-                {letter}
-              </button>
+      {started && (
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            {SERVICES.map(svc => (
+              <ServiceCard
+                key={svc}
+                svc={svc}
+                state={getServiceState(svc)}
+                leftLabel={leftLabel}
+                rightLabel={rightLabel}
+                leftDomain={leftDomain}
+                rightDomain={rightDomain}
+                onCompare={runCompare}
+              />
             ))}
           </div>
-        </div>
-      </div>
 
-      {/* Mobile Filter Button */}
-      <div className="lg:hidden max-w-7xl mx-auto px-3 sm:px-6 pb-2">
-        <button
-          onClick={() => setSidebarOpen(true)}
-          className="inline-flex items-center gap-2 px-4 py-2.5 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
-        >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 010 2H4a1 1 0 01-1-1zm3 6a1 1 0 011-1h10a1 1 0 010 2H7a1 1 0 01-1-1zm2 6a1 1 0 011-1h6a1 1 0 010 2H9a1 1 0 01-1-1z" />
-          </svg>
-          Filters
-          {activeFilters.length > 0 && (
-            <span className="bg-[#7B1FA2] text-white text-xs w-5 h-5 rounded-full flex items-center justify-center">{activeFilters.length}</span>
-          )}
-        </button>
-      </div>
-
-      {/* Mobile/Tablet Sidebar Drawer */}
-      {sidebarOpen && (
-        <div className="fixed inset-0 z-50 lg:hidden">
-          <div className="absolute inset-0 bg-black/40" onClick={() => setSidebarOpen(false)} />
-          <div className="absolute inset-y-0 left-0 w-80 max-w-[85vw] bg-white shadow-xl overflow-y-auto">
-            <div className="sticky top-0 bg-white border-b px-4 py-3 flex items-center justify-between z-10">
-              <h2 className="text-base font-semibold text-gray-800">Filters</h2>
-              <button onClick={() => setSidebarOpen(false)} className="w-8 h-8 flex items-center justify-center text-gray-500 hover:text-gray-700 rounded-full hover:bg-gray-100">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-            <div className="p-4">
-              {sidebarContent}
-            </div>
-          </div>
+          <EventsSection
+            title="Upcoming Events"
+            iconColor="bg-amber-100 text-amber-600"
+            leftData={upcomingLeft}
+            rightData={upcomingRight}
+            leftLabel={leftLabel}
+            rightLabel={rightLabel}
+            leftDomain={leftDomain}
+            rightDomain={rightDomain}
+          />
+          <EventsSection
+            title="Past Events"
+            iconColor="bg-gray-200 text-gray-600"
+            leftData={pastLeft}
+            rightData={pastRight}
+            leftLabel={leftLabel}
+            rightLabel={rightLabel}
+            leftDomain={leftDomain}
+            rightDomain={rightDomain}
+          />
         </div>
       )}
 
-      {/* Main Content */}
-      <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-6">
-        <div className="flex gap-6">
-          {/* Desktop Sidebar */}
-          <aside className="hidden lg:block w-72 flex-shrink-0">
-            {sidebarContent}
-          </aside>
-
-          {/* Results */}
-          <div className="flex-grow min-w-0">
-            <div className="mb-3 sm:mb-4">
-              <span className="text-sm text-gray-600">
-                Total results ({totalResults.toLocaleString()})
-              </span>
-            </div>
-
-            {loading ? (
-              <div className="flex items-center justify-center py-16 sm:py-20">
-                <svg className="animate-spin h-8 w-8 text-[#7B1FA2]" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+      {!started && (
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-20 text-center">
+          <div className="text-gray-300 mb-4">
+            <svg className="w-16 h-16 mx-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
                 </svg>
-              </div>
-            ) : error ? (
-              <div className="text-center py-16 sm:py-20 text-red-600">{error}</div>
-            ) : filteredPeople.length === 0 ? (
-              <div className="text-center py-16 sm:py-20 text-gray-500">
-                No results found. Try a different search or{' '}
-                <button onClick={clearAllFilters} className="text-[#7B1FA2] hover:underline">clear all filters</button>.
-              </div>
-            ) : (
-              <>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 sm:gap-4">
-                  {filteredPeople.map((person, index) => {
-                    const isExpanded = expandedIndex === index
-                    const isEndOfRow = index % 2 === 1 || index === filteredPeople.length - 1
-                    const rowStart = index % 2 === 0 ? index : index - 1
-                    const expandedInThisRow = expandedIndex !== null && expandedIndex >= rowStart && expandedIndex <= rowStart + 1
-
-                    return (
-                      <React.Fragment key={person.id || `person-${index}`}>
-                        <PersonCard
-                          person={person}
-                          index={index}
-                          isExpanded={isExpanded}
-                          onToggle={() => setExpandedIndex(isExpanded ? null : index)}
-                        />
-                        {isEndOfRow && expandedInThisRow && expandedIndex !== null && filteredPeople[expandedIndex] && (
-                          <div className="col-span-1 md:col-span-2">
-                            <ExpandedDetail
-                              person={filteredPeople[expandedIndex]}
-                              onClose={() => setExpandedIndex(null)}
-                              arrowPosition={expandedIndex % 2 === 0 ? 'left' : 'right'}
-                            />
-                          </div>
-                        )}
-                      </React.Fragment>
-                    )
-                  })}
-                </div>
-
-                {hasMore && (
-                  <div className="mt-6 sm:mt-8 flex justify-center">
-                    <button
-                      onClick={handleLoadMore}
-                      disabled={loadingMore}
-                      className="w-full sm:w-auto px-8 py-3 bg-[#7B1FA2] text-white font-medium rounded-lg hover:bg-[#6A1B91] disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
-                    >
-                      {loadingMore ? (
-                        <span className="inline-flex items-center justify-center gap-2">
-                          <svg className="animate-spin h-5 w-5" fill="none" viewBox="0 0 24 24">
-                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                          </svg>
-                          Loading...
-                        </span>
-                      ) : (
-                        'Load More'
-                      )}
-                    </button>
-                  </div>
-                )}
-              </>
-            )}
           </div>
+          <p className="text-gray-500 text-lg font-medium">Select two servers and click Compare</p>
+          <p className="text-gray-400 text-sm mt-1">Compares Insights, People/Bio, News & Events between servers</p>
         </div>
-      </div>
+      )}
     </div>
   )
 }
 
-const PersonCard = memo(function PersonCard({ person, index = 0, isExpanded, onToggle }: {
-  person: Person; index?: number; isExpanded: boolean; onToggle: () => void
+const ServiceCard = memo(function ServiceCard({
+  svc, state: s, leftLabel, rightLabel, leftDomain, rightDomain, onCompare,
+}: {
+  svc: Service
+  state: ServiceState
+  leftLabel: string
+  rightLabel: string
+  leftDomain: string
+  rightDomain: string
+  onCompare: (svc: Service) => void
 }) {
-  const fullName = `${person.firstName}${person.lastName ? ' ' + person.lastName : ''}`
-  const imageUrl = person.imgUrl ? `https://www.dentons.com${person.imgUrl}` : ''
-  const emailAddr = person.emailMeAddress || person.email || ''
-  const delay = Math.min(index * 60, 800)
+  const meta = SERVICE_META[svc]
+  const countsReady = s.left.count !== null && s.right.count !== null && !s.left.loading && !s.right.loading
+  const hasDiff = countsReady && s.left.count !== s.right.count
+  const diff = (s.left.count ?? 0) - (s.right.count ?? 0)
 
   return (
-    <div
-      className={`card-ai-drop bg-white border transition-shadow relative ${isExpanded ? 'border-[#7B1FA2] shadow-md' : 'border-gray-200 hover:shadow-md'}`}
-      style={{ animationDelay: `${delay}ms` }}
-    >
-      <div className="p-3 sm:p-5 flex items-start gap-3 sm:gap-4">
-        <div className="flex-shrink-0">
-          {imageUrl ? (
-            <Image
-              src={imageUrl}
-              alt={fullName}
-              width={80}
-              height={100}
-              className="rounded-md w-14 sm:w-20"
-              style={{ objectFit: 'contain', height: 'auto' }}
-              unoptimized
-            />
+    <section className="bg-white rounded-2xl border border-gray-200 p-5 sm:p-6">
+      <div className="flex items-center gap-3 mb-5">
+        <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${meta.color}`}>
+          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d={meta.iconPath} /></svg>
+        </div>
+        <h2 className="text-base font-semibold text-gray-900">{meta.label}</h2>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        {([
+          { data: s.left, label: leftLabel, domain: leftDomain },
+          { data: s.right, label: rightLabel, domain: rightDomain },
+        ] as const).map(({ data, label, domain }, i) => (
+          <div key={i === 0 ? 'left' : 'right'} className="border border-gray-100 rounded-xl p-4 flex flex-col items-center gap-1">
+            <p className="text-[10px] uppercase tracking-widest text-gray-400 font-medium">{label}</p>
+            <p className="text-[9px] text-gray-300 mb-1 truncate max-w-full">{domain}</p>
+            {data.loading ? <Spinner className="h-6 w-6 my-2" />
+              : data.error ? <p className="text-red-500 text-[10px] text-center my-2 leading-tight">{data.error}</p>
+              : data.count !== null ? <p className="text-3xl font-bold text-[#7B1FA2]">{data.count.toLocaleString()}</p>
+              : null}
+            <p className="text-[10px] text-gray-400">Total</p>
+          </div>
+        ))}
+            </div>
+
+      {countsReady && (
+        <div className="mt-4">
+          {!hasDiff ? (
+            <div className="text-center border border-green-200 bg-green-50 rounded-lg p-3">
+              <div className="inline-flex items-center gap-1.5 text-green-700 text-sm font-medium">
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                Counts Match
+              </div>
+            </div>
           ) : (
-            <div className="w-14 h-14 sm:w-20 sm:h-20 bg-gray-200 rounded-md flex items-center justify-center">
-              <span className="text-xl sm:text-2xl text-gray-400">{person.firstName?.charAt(0)}</span>
+            <div className="border border-amber-200 bg-amber-50 rounded-lg p-3">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <span className="flex items-center gap-1.5 text-amber-700 text-sm font-medium">
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+                  {Math.abs(diff)} diff
+                </span>
+                <span className="text-[10px] text-amber-600">
+                  {diff > 0 ? leftLabel : rightLabel} has {Math.abs(diff)} more
+                </span>
+              </div>
+
+              {!s.compare && !s.comparing && !s.compareError && (
+                <button
+                  onClick={() => onCompare(svc)}
+                  className="mt-3 w-full py-2 px-4 bg-[#7B1FA2] text-white text-xs font-medium rounded-lg hover:bg-[#6A1B9A] transition-colors flex items-center justify-center gap-2"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
+                  Find Differences
+                </button>
+              )}
+
+              {s.comparing && (
+                <div className="flex items-center gap-2 text-amber-700 py-2 mt-2">
+                  <Spinner className="h-4 w-4" /><span className="text-xs">Finding differences...</span>
+                </div>
+              )}
+
+              {s.compareError && (
+                <div className="text-red-600 text-xs py-1 mt-2">{s.compareError}</div>
+              )}
+
+              {s.compare && (
+                <div className="space-y-2 mt-3">
+                  <p className="text-[10px] text-amber-500">
+                    Scanned {s.compare.itemsScanned?.toLocaleString()} items across {s.compare.pagesScanned} pages
+                  </p>
+                  {(() => {
+                    const d = s.compare!.difference
+                    const n = Math.abs(d)
+                    const onlyIn1 = s.compare!.onlyIn1
+                    const onlyIn2 = s.compare!.onlyIn2
+                    const showOnlyExtra = n > 0 && (onlyIn1.length > n || onlyIn2.length > n)
+                    const leftItems = d > 0 ? onlyIn1.slice(0, n) : []
+                    const rightItems = d < 0 ? onlyIn2.slice(0, n) : []
+                    return (
+                      <>
+                        {showOnlyExtra && (
+                          <p className="text-[10px] text-amber-600">
+                            Showing the {n} item(s) that explain the count difference (extra on {d > 0 ? leftLabel : rightLabel}).
+                          </p>
+                        )}
+                        {s.compare!.duplicateHint && (
+                          <p className="text-[10px] text-amber-600">
+                            Count difference is from duplicate link(s) on {s.compare!.duplicateHint === 'left' ? leftLabel : rightLabel} (same URL counted more than once). Showing one example below.
+                          </p>
+                        )}
+                        <DiffList label={`Only in ${leftLabel}${d > 0 && onlyIn1.length > n ? ` (showing ${n} of ${onlyIn1.length})` : ''}`} items={leftItems} service={svc} />
+                        <DiffList label={`Only in ${rightLabel}${d < 0 && onlyIn2.length > n ? ` (showing ${n} of ${onlyIn2.length})` : ''}`} items={rightItems} service={svc} />
+                        {onlyIn1.length === 0 && onlyIn2.length === 0 && (
+                          <p className="text-xs text-amber-700">
+                            {s.compare!.itemsScanned === 0
+                              ? 'Items could not be loaded. Click Find Differences again to retry.'
+                              : s.compare!.duplicateHint
+                                ? `Count differs by ${n} but the extra item could not be listed (may be duplicate or missing link).`
+                                : `All ${s.compare!.itemsScanned.toLocaleString()} scanned items match; difference may be in ordering or unsynced data.`}
+                          </p>
+                        )}
+                      </>
+                    )
+                  })()}
+                </div>
+              )}
             </div>
           )}
-        </div>
+                  </div>
+                )}
+    </section>
+  )
+})
 
-        <div className="flex-grow min-w-0 pr-6">
-          <h2 className="text-base sm:text-lg font-bold text-[#7B1FA2] mb-0.5 sm:mb-1 truncate">{fullName}</h2>
-          <p className="text-gray-700 text-xs sm:text-sm mb-0.5">{person.jobTitle}</p>
-          <p className="text-gray-600 text-xs sm:text-sm mb-2 sm:mb-3">{person.officeTitle || person.officeDetails}</p>
-          <a
-            href={`mailto:${emailAddr}`}
-            className="inline-flex items-center gap-1.5 sm:gap-2 text-[#7B1FA2] hover:text-[#6A1B91] text-xs sm:text-sm font-medium"
-          >
-            <svg className="w-3.5 h-3.5 sm:w-4 sm:h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-            </svg>
-            Email me
-          </a>
-        </div>
-
-        <button
-          onClick={onToggle}
-          className={`absolute bottom-3 right-3 sm:bottom-5 sm:right-5 w-7 h-7 flex items-center justify-center rounded-full transition-colors ${
-            isExpanded ? 'bg-[#7B1FA2] text-white' : 'text-gray-400 hover:text-[#7B1FA2] border border-gray-300 hover:border-[#7B1FA2]'
-          }`}
-          aria-label={isExpanded ? 'Collapse details' : 'Expand details'}
-        >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}>
-            {isExpanded
-              ? <path strokeLinecap="round" strokeLinejoin="round" d="M20 12H4" />
-              : <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
-            }
-          </svg>
-        </button>
+const DiffList = memo(function DiffList({ label, items, service }: { label: string; items: DiffItem[]; service: Service }) {
+  if (!items || items.length === 0) return null
+  return (
+    <div>
+      <h4 className="text-xs font-semibold text-gray-700 mb-1">{label} ({items.length})</h4>
+      <div className="space-y-1.5">
+        {items.map((item, i) => (
+          <div key={i} className="bg-white border border-amber-200 rounded-md p-2">
+            {service === 'people' ? (
+              <>
+                <p className="font-medium text-xs text-gray-900">{item.name}</p>
+                {item.jobTitle && <p className="text-[10px] text-gray-500">{item.jobTitle}</p>}
+                {item.office && <p className="text-[10px] text-gray-400">{item.office}</p>}
+              </>
+            ) : (
+              <>
+                <p className="font-medium text-xs text-gray-900">{item.heading}</p>
+                {item.date && <p className="text-[10px] text-gray-500">{item.date}</p>}
+              </>
+            )}
+            <a href={item.link} target="_blank" rel="noopener noreferrer" className="text-[10px] text-[#7B1FA2] hover:underline mt-0.5 block break-all">{item.link}</a>
+          </div>
+        ))}
       </div>
     </div>
   )
 })
 
-const ExpandedDetail = memo(function ExpandedDetail({ person, onClose, arrowPosition }: {
-  person: Person; onClose: () => void; arrowPosition: 'left' | 'right'
+function EventsSection({
+  title, iconColor, leftData, rightData, leftLabel, rightLabel, leftDomain, rightDomain,
+}: {
+  title: string; iconColor: string; leftData: EventsData; rightData: EventsData
+  leftLabel: string; rightLabel: string; leftDomain: string; rightDomain: string
 }) {
-  const profileLink = person.link || person.profileUrl || ''
+  const [showDiff, setShowDiff] = useState(false)
 
-  const stripHtml = (html: string) => {
-    const tmp = document.createElement('div')
-    tmp.innerHTML = html
-    return tmp.textContent || tmp.innerText || ''
-  }
+  const ready = !leftData.loading && !rightData.loading && leftData.count !== null && rightData.count !== null
+  const diff = (leftData.count ?? 0) - (rightData.count ?? 0)
+  const hasDiff = ready && diff !== 0
+
+  const onlyLeft = showDiff
+    ? leftData.events.filter(e => !rightData.events.some(r => normalizePath(r.link) === normalizePath(e.link)))
+    : []
+  const onlyRight = showDiff
+    ? rightData.events.filter(e => !leftData.events.some(l => normalizePath(l.link) === normalizePath(e.link)))
+    : []
 
   return (
-    <div className="relative animate-slideDown">
-      {/* Arrow pointing to the source card */}
-      <div
-        className={`absolute -top-2 w-4 h-4 bg-white border-l border-t border-[#7B1FA2] rotate-45 z-10 hidden md:block ${
-          arrowPosition === 'left' ? 'left-[25%]' : 'right-[25%]'
-        }`}
-      />
+    <section className="bg-white rounded-2xl border border-gray-200 p-5 sm:p-6">
+      <div className="flex items-center gap-3 mb-5">
+        <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${iconColor}`}>
+          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
+        </div>
+        <h2 className="text-base font-semibold text-gray-900">{title}</h2>
+        </div>
 
-      <div className="border border-[#7B1FA2] bg-white rounded-sm overflow-hidden">
-        <div className="p-4 sm:p-6 relative">
+      <div className="grid grid-cols-2 gap-3 max-w-md">
+        {([
+          { data: leftData, label: leftLabel, domain: leftDomain },
+          { data: rightData, label: rightLabel, domain: rightDomain },
+        ] as const).map(({ data, label, domain }, i) => (
+          <div key={i === 0 ? 'left' : 'right'} className="border border-gray-100 rounded-xl p-4 flex flex-col items-center gap-1">
+            <p className="text-[10px] uppercase tracking-widest text-gray-400 font-medium">{label}</p>
+            <p className="text-[9px] text-gray-300 mb-1 truncate max-w-full">{domain}</p>
+            {data.loading ? <Spinner className="h-6 w-6 my-2" />
+              : data.error ? <p className="text-red-500 text-[10px] text-center my-2 leading-tight">{data.error}</p>
+              : data.count !== null ? <p className="text-3xl font-bold text-[#7B1FA2]">{data.count.toLocaleString()}</p>
+              : null}
+            <p className="text-[10px] text-gray-400">Total</p>
+          </div>
+        ))}
+      </div>
+
+      {ready && (
+        <div className="mt-4">
+          {!hasDiff ? (
+            <div className="text-center border border-green-200 bg-green-50 rounded-lg p-3 max-w-md">
+              <div className="inline-flex items-center gap-1.5 text-green-700 text-sm font-medium">
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                Counts Match
+              </div>
+            </div>
+          ) : (
+            <div className="border border-amber-200 bg-amber-50 rounded-lg p-3 max-w-md">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <span className="flex items-center gap-1.5 text-amber-700 text-sm font-medium">
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+                  {Math.abs(diff)} count diff
+                </span>
+                <span className="text-[10px] text-amber-600">
+                  {diff > 0 ? leftLabel : rightLabel} has {Math.abs(diff)} more
+                </span>
+    </div>
+
+              {!showDiff && (
           <button
-            onClick={onClose}
-            className="absolute top-3 right-3 sm:top-4 sm:right-4 w-6 h-6 flex items-center justify-center text-gray-400 hover:text-gray-600 rounded-full hover:bg-gray-200 transition-colors z-10"
-            aria-label="Close"
+                  onClick={() => setShowDiff(true)}
+                  className="mt-3 w-full py-2 px-4 bg-[#7B1FA2] text-white text-xs font-medium rounded-lg hover:bg-[#6A1B9A] transition-colors flex items-center justify-center gap-2"
           >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
+                  Find Differences
           </button>
-
-          <div className="flex flex-col md:flex-row gap-5 sm:gap-8 pr-6">
-            <div className="md:w-2/5 min-w-0">
-              {person.about && (
-                <p className="text-gray-600 text-xs sm:text-sm leading-relaxed mb-4 sm:mb-5 line-clamp-4">
-                  {stripHtml(person.about)}
-                </p>
               )}
 
-              {person.officeList && person.officeList.length > 0 && (
+              {showDiff && (
+                <div className="space-y-2 mt-3">
+                  <p className="text-[10px] text-amber-500">Compared {leftData.events.length + rightData.events.length} events from first page</p>
+                  {onlyLeft.length > 0 && (
                 <div>
-                  <h4 className="text-xs sm:text-sm font-bold text-gray-800 mb-2">
-                    {person.expandOfficeHeading || 'Offices'}
-                  </h4>
-                  <div className="space-y-2">
-                    {person.officeList.map((office, i) => (
-                      <div key={i}>
-                        <p className="text-xs sm:text-sm text-gray-700">{office.office}</p>
-                        {office.telNo && (
-                          <a href={`tel:${office.telNo}`} className="text-xs sm:text-sm text-[#7B1FA2] hover:underline">
-                            {office.telNo}
-                          </a>
-                        )}
-                        {office.mobileNo && (
-                          <a href={`tel:${office.mobileNo}`} className="text-xs sm:text-sm text-[#7B1FA2] hover:underline block">
-                            {office.mobileNo}
-                          </a>
-                        )}
+                      <h4 className="text-xs font-semibold text-gray-700 mb-1">Only in {leftLabel} ({onlyLeft.length})</h4>
+                      <div className="space-y-1.5">
+                        {onlyLeft.map((item, i) => (
+                          <div key={i} className="bg-white border border-amber-200 rounded-md p-2">
+                            <p className="font-medium text-xs text-gray-900">{item.title}</p>
+                            {item.date && <p className="text-[10px] text-gray-500">{item.date}</p>}
+                            <a href={item.link} target="_blank" rel="noopener noreferrer" className="text-[10px] text-[#7B1FA2] hover:underline mt-0.5 block break-all">{item.link}</a>
                       </div>
                     ))}
                   </div>
                 </div>
               )}
+                  {onlyRight.length > 0 && (
+                    <div>
+                      <h4 className="text-xs font-semibold text-gray-700 mb-1">Only in {rightLabel} ({onlyRight.length})</h4>
+                      <div className="space-y-1.5">
+                        {onlyRight.map((item, i) => (
+                          <div key={i} className="bg-white border border-amber-200 rounded-md p-2">
+                            <p className="font-medium text-xs text-gray-900">{item.title}</p>
+                            {item.date && <p className="text-[10px] text-gray-500">{item.date}</p>}
+                            <a href={item.link} target="_blank" rel="noopener noreferrer" className="text-[10px] text-[#7B1FA2] hover:underline mt-0.5 block break-all">{item.link}</a>
             </div>
-
-            {person.focusList && person.focusList.length > 0 && (
-              <div className="md:w-3/5 min-w-0">
-                <h4 className="text-xs sm:text-sm font-bold text-gray-800 mb-2">
-                  {person.expandAOF || 'Areas of focus'}
-                </h4>
-                <div className="grid grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-0.5">
-                  {person.focusList.map((focus, i) => (
-                    <p key={i} className="text-xs sm:text-sm text-gray-600">{focus.node}</p>
                   ))}
                 </div>
               </div>
             )}
+                  {onlyLeft.length === 0 && onlyRight.length === 0 && (
+                    <p className="text-xs text-amber-700">Count differs but first-page events match. Difference may be in later pages.</p>
+                  )}
           </div>
-
-          {profileLink && (
-            <div className="mt-4 sm:mt-5 flex justify-end">
-              <a
-                href={profileLink}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-xs sm:text-sm font-medium text-[#7B1FA2] hover:text-[#6A1B91] hover:underline"
-              >
-                {person.expandVFP || 'View full profile'}
-              </a>
+              )}
             </div>
           )}
         </div>
-      </div>
-    </div>
+      )}
+    </section>
   )
-})
+}

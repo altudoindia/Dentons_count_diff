@@ -1,13 +1,12 @@
 import type { Metadata } from 'next'
 import { Inter } from 'next/font/google'
 import './globals.css'
-import ChatBot from './components/ChatBot'
 
 const inter = Inter({ subsets: ['latin'] })
 
 export const metadata: Metadata = {
-  title: 'Dentons People Search',
-  description: 'Search and discover Dentons professionals',
+  title: 'Dentons Server Comparison',
+  description: 'Compare Insights, People, News & Events across Dentons servers',
 }
 
 export default function RootLayout({
@@ -19,7 +18,6 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <body className={inter.className}>
         {children}
-        <ChatBot />
       </body>
     </html>
   )

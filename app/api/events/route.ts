@@ -1,5 +1,7 @@
 import { NextResponse } from 'next/server'
 
+export const dynamic = 'force-dynamic'
+
 const ALLOWED_DOMAINS = new Set([
   'www.dentons.com', 's10-www.dentons.com', 'www.preview.dentons.com',
   's10-nacd1.dentons.com', 's10-eucd1.dentons.com', 's10-nacd2.dentons.com',
@@ -70,7 +72,7 @@ export async function GET(request: Request) {
       const data = await res.json()
       return NextResponse.json(data, {
         status: res.status,
-        headers: { 'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=120' },
+        headers: { 'Cache-Control': 'no-store, no-cache, must-revalidate' },
       })
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error'
@@ -104,7 +106,7 @@ export async function GET(request: Request) {
     const result = extractEvents(html, domain, type)
 
     return NextResponse.json(result, {
-      headers: { 'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=120' },
+      headers: { 'Cache-Control': 'no-store, no-cache, must-revalidate' },
     })
   } catch (error) {
     clearTimeout(timer)

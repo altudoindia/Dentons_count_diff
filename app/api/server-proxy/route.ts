@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server'
 import { gunzipSync } from 'zlib'
 
+export const dynamic = 'force-dynamic'
+
 const DENTONS_HEADERS = {
   'Accept': 'application/json, text/plain, */*',
   'Accept-Encoding': 'gzip, deflate, br',
@@ -59,7 +61,7 @@ export async function GET(request: Request) {
       const proxyUrl = `${proxyBase.replace(/\/$/, '')}/api/server-proxy?${searchParams.toString()}`
       const res = await fetch(proxyUrl, { cache: 'no-store', signal: AbortSignal.timeout(FETCH_TIMEOUT + 5_000), headers: { 'ngrok-skip-browser-warning': 'true' } })
       const data = await res.json()
-      const headers: HeadersInit = res.ok ? { 'Cache-Control': 'public, s-maxage=30, stale-while-revalidate=60' } : {}
+      const headers: HeadersInit = res.ok ? { 'Cache-Control': 'no-store, no-cache, must-revalidate' } : {}
       return NextResponse.json(data, { status: res.status, headers })
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error'
@@ -101,7 +103,7 @@ export async function GET(request: Request) {
     const result = Array.isArray(parsed) && parsed.length > 0 ? parsed[0] : parsed
 
     return NextResponse.json(result, {
-      headers: { 'Cache-Control': 'public, s-maxage=30, stale-while-revalidate=60' },
+      headers: { 'Cache-Control': 'no-store, no-cache, must-revalidate' },
     })
   } catch (error) {
     clearTimeout(timer)

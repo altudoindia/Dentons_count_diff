@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server'
 import { gunzipSync } from 'zlib'
 
+export const dynamic = 'force-dynamic'
+
 const DENTONS_HEADERS = {
   'Accept': 'application/json, text/plain, */*',
   'Accept-Encoding': 'gzip, deflate, br',
