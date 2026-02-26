@@ -41,6 +41,7 @@ interface CompareResult {
   difference: number
   onlyIn1: DiffItem[]
   onlyIn2: DiffItem[]
+  duplicateHint?: 'left' | 'right' | null
   pagesScanned: number
   itemsScanned: number
   complete: boolean
@@ -440,13 +441,20 @@ const ServiceCard = memo(function ServiceCard({
                             Showing the {n} item(s) that explain the count difference (extra on {d > 0 ? leftLabel : rightLabel}).
                           </p>
                         )}
+                        {s.compare!.duplicateHint && (
+                          <p className="text-[10px] text-amber-600">
+                            Count difference is from duplicate link(s) on {s.compare!.duplicateHint === 'left' ? leftLabel : rightLabel} (same URL counted more than once). Showing one example below.
+                          </p>
+                        )}
                         <DiffList label={`Only in ${leftLabel}${d > 0 && onlyIn1.length > n ? ` (showing ${n} of ${onlyIn1.length})` : ''}`} items={leftItems} service={svc} />
                         <DiffList label={`Only in ${rightLabel}${d < 0 && onlyIn2.length > n ? ` (showing ${n} of ${onlyIn2.length})` : ''}`} items={rightItems} service={svc} />
                         {onlyIn1.length === 0 && onlyIn2.length === 0 && (
                           <p className="text-xs text-amber-700">
                             {s.compare!.itemsScanned === 0
                               ? 'Items could not be loaded. Click Find Differences again to retry.'
-                              : `All ${s.compare!.itemsScanned.toLocaleString()} scanned items match; difference may be in ordering or unsynced data.`}
+                              : s.compare!.duplicateHint
+                                ? `Count differs by ${n} but the extra item could not be listed (may be duplicate or missing link).`
+                                : `All ${s.compare!.itemsScanned.toLocaleString()} scanned items match; difference may be in ordering or unsynced data.`}
                           </p>
                         )}
                       </>

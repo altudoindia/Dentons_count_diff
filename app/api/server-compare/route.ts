@@ -119,10 +119,15 @@ async function fetchPageWithRetry(baseUrl: string, page: number, size: number): 
   return null
 }
 
-async function fetchAllItemsWithSize(baseUrl: string, total: number, service: string, pageSize: number): Promise<Map<string, GenericItem>> {
+interface FetchResult {
+  map: Map<string, GenericItem>
+  duplicateSample: GenericItem | null
+}
+
+async function fetchAllItemsWithSize(baseUrl: string, total: number, service: string, pageSize: number): Promise<FetchResult> {
   const totalPages = Math.ceil(total / pageSize)
   const map = new Map<string, GenericItem>()
-  let failedPages = 0
+  let duplicateSample: GenericItem | null = null
 
   for (let batch = 0; batch < totalPages; batch += CONCURRENCY) {
     const pages = Array.from(
@@ -133,26 +138,29 @@ async function fetchAllItemsWithSize(baseUrl: string, total: number, service: st
       pages.map(p => fetchPageWithRetry(baseUrl, p, pageSize))
     )
     for (const data of results) {
-      if (!data) { failedPages++; continue }
+      if (!data) continue
       for (const item of extractItems(data as Record<string, unknown>, service)) {
-        if (item?.link) map.set(normalizePath(item.link), item)
+        if (!item?.link) continue
+        const path = normalizePath(item.link)
+        if (map.has(path)) duplicateSample = duplicateSample ?? item
+        else map.set(path, item)
       }
     }
   }
-  return map
+  return { map, duplicateSample }
 }
 
-async function fetchAllItems(baseUrl: string, total: number, service: string): Promise<Map<string, GenericItem>> {
+async function fetchAllItems(baseUrl: string, total: number, service: string): Promise<FetchResult> {
   for (const size of FALLBACK_PAGE_SIZES) {
-    const map = await fetchAllItemsWithSize(baseUrl, total, service, size)
-    if (map.size > 0) {
-      console.log(`[compare] Got ${map.size} items (pageSize=${size}) from ${baseUrl}`)
-      return map
+    const result = await fetchAllItemsWithSize(baseUrl, total, service, size)
+    if (result.map.size > 0) {
+      console.log(`[compare] Got ${result.map.size} items (pageSize=${size}) from ${baseUrl}`)
+      return result
     }
     console.log(`[compare] pageSize=${size} returned 0 items, trying smaller size`)
   }
-  console.log(`[compare] All page sizes failed for ${baseUrl}, returning empty map`)
-  return new Map()
+  console.log(`[compare] All page sizes failed for ${baseUrl}, returning empty`)
+  return { map: new Map(), duplicateSample: null }
 }
 
 export async function GET(request: Request) {
@@ -183,21 +191,31 @@ export async function GET(request: Request) {
     const total2 = first2.totalResult as number
     const diff = total1 - total2
 
-    const [map1, map2] = await Promise.all([
+    const [res1, res2] = await Promise.all([
       fetchAllItems(url1, total1, service),
       fetchAllItems(url2, total2, service),
     ])
+    const map1 = res1.map
+    const map2 = res2.map
 
     const onlyIn1: GenericItem[] = []
     const onlyIn2: GenericItem[] = []
     for (const [path, item] of map1) { if (!map2.has(path)) onlyIn1.push(item) }
     for (const [path, item] of map2) { if (!map1.has(path)) onlyIn2.push(item) }
 
+    const diffNonZero = diff !== 0
+    const noUniqueDiff = onlyIn1.length === 0 && onlyIn2.length === 0
+    const duplicateOn1 = diffNonZero && noUniqueDiff && diff > 0 && res1.duplicateSample
+    const duplicateOn2 = diffNonZero && noUniqueDiff && diff < 0 && res2.duplicateSample
+    const extraFrom1 = duplicateOn1 ? [formatItem(res1.duplicateSample!, service)] : onlyIn1.map(i => formatItem(i, service))
+    const extraFrom2 = duplicateOn2 ? [formatItem(res2.duplicateSample!, service)] : onlyIn2.map(i => formatItem(i, service))
+
     return NextResponse.json(
       {
         total1, total2, difference: diff,
-        onlyIn1: onlyIn1.map(i => formatItem(i, service)),
-        onlyIn2: onlyIn2.map(i => formatItem(i, service)),
+        onlyIn1: extraFrom1,
+        onlyIn2: extraFrom2,
+        duplicateHint: noUniqueDiff && diff !== 0 ? (diff > 0 ? 'left' : 'right') : null,
         pagesScanned: Math.ceil(total1 / PAGE_SIZE) + Math.ceil(total2 / PAGE_SIZE),
         itemsScanned: map1.size + map2.size,
         complete: true,
