@@ -22,6 +22,8 @@ const ALLOWED_DOMAINS = new Set([
 
 const PAGE_SIZE = 100
 const FETCH_TIMEOUT = 20_000
+const CONCURRENCY = 2
+const BATCH_DELAY_MS = 400
 
 interface PersonItem {
   firstName?: string
@@ -68,31 +70,22 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: 'Invalid domain' }, { status: 400 })
   }
 
-  const proxyBase = process.env.DENTONS_PROXY_URL
-  if (proxyBase) {
-    try {
-      const proxyUrl = `${proxyBase.replace(/\/$/, '')}/api/people/empty-jobtitle?${searchParams.toString()}`
-      const res = await fetch(proxyUrl, { cache: 'no-store', signal: AbortSignal.timeout(120_000), headers: { 'ngrok-skip-browser-warning': 'true' } })
-      const data = await res.json()
-      return NextResponse.json(data, {
-        status: res.status,
-        headers: { 'Cache-Control': 'no-store, no-cache, must-revalidate' },
-      })
-    } catch (err) {
-      console.error('Proxy fetch failed:', err)
-      return NextResponse.json({ error: 'Proxy unreachable', domain, items: [], count: 0 }, { status: 502 })
-    }
-  }
-
   try {
     const { totalResult, persons: firstPagePersons } = await fetchPage(domain, 1)
     const emptyJobTitleItems: PersonItem[] = (firstPagePersons || []).filter(p => isEmptyJobTitle(p.jobTitle))
 
     const totalPages = Math.ceil(totalResult / PAGE_SIZE)
-    for (let page = 2; page <= totalPages; page++) {
-      const { persons } = await fetchPage(domain, page)
-      for (const p of persons || []) {
-        if (isEmptyJobTitle(p.jobTitle)) emptyJobTitleItems.push(p)
+    for (let batch = 2; batch <= totalPages; batch += CONCURRENCY) {
+      if (batch > 2) await new Promise(r => setTimeout(r, BATCH_DELAY_MS))
+      const pages = Array.from(
+        { length: Math.min(CONCURRENCY, totalPages - batch + 1) },
+        (_, i) => batch + i
+      )
+      const results = await Promise.all(pages.map(p => fetchPage(domain, p)))
+      for (const { persons } of results) {
+        for (const p of persons || []) {
+          if (isEmptyJobTitle(p.jobTitle)) emptyJobTitleItems.push(p)
+        }
       }
     }
 

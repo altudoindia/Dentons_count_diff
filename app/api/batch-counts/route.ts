@@ -25,8 +25,6 @@ const ALLOWED_DOMAINS = new Set([
   'uat-nacd1.dentons.com', 'uat-eucd1.dentons.com',
 ])
 
-const SERVICES = ['insights', 'people', 'news'] as const
-
 async function fetchCount(domain: string, service: string): Promise<{ service: string; count: number | null; error: string | null }> {
   const servicePath = SERVICE_PATHS[service]
   if (!servicePath) return { service, count: null, error: 'Unknown service' }
@@ -63,29 +61,11 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: 'Invalid domain' }, { status: 400 })
   }
 
-  // When deployed on Vercel (no VPN), forward to a proxy that has VPN access to Dentons URLs
-  const proxyBase = process.env.DENTONS_PROXY_URL
-  if (proxyBase) {
-    try {
-      const proxyUrl = `${proxyBase.replace(/\/$/, '')}/api/batch-counts?${searchParams.toString()}`
-      const res = await fetch(proxyUrl, { cache: 'no-store', signal: AbortSignal.timeout(25_000), headers: { 'ngrok-skip-browser-warning': 'true' } })
-      const data = await res.json()
-      return NextResponse.json(data, {
-        status: res.status,
-        headers: { 'Cache-Control': 'no-store, no-cache, must-revalidate' },
-      })
-    } catch (err) {
-      console.error('Proxy fetch failed:', err)
-      return NextResponse.json(
-        { error: 'Proxy unreachable', domain, insights: { count: null, error: 'Proxy unreachable' }, people: { count: null, error: 'Proxy unreachable' }, news: { count: null, error: 'Proxy unreachable' } },
-        { status: 502 }
-      )
-    }
-  }
-
-  // Fetch sequentially and assign directly to the correct key so insights/news can never get swapped
+  const STAGGER_MS = 200
   const insightsResult = await fetchCount(domain, 'insights')
+  await new Promise(r => setTimeout(r, STAGGER_MS))
   const peopleResult = await fetchCount(domain, 'people')
+  await new Promise(r => setTimeout(r, STAGGER_MS))
   const newsResult = await fetchCount(domain, 'news')
 
   const payload = {

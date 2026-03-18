@@ -103,9 +103,10 @@ function formatItem(item: GenericItem, service: string) {
   }
 }
 
-const CONCURRENCY = 15
+const CONCURRENCY = 2
 const PAGE_SIZE = 100
 const MAX_RETRIES = 2
+const BATCH_DELAY_MS = 500
 const FALLBACK_PAGE_SIZES = [100, 50, 20]
 
 async function fetchPageWithRetry(baseUrl: string, page: number, size: number): Promise<Record<string, unknown> | null> {
@@ -132,6 +133,7 @@ async function fetchAllItemsWithSize(baseUrl: string, total: number, service: st
   let duplicateSample: GenericItem | null = null
 
   for (let batch = 0; batch < totalPages; batch += CONCURRENCY) {
+    if (batch > 0) await new Promise(r => setTimeout(r, BATCH_DELAY_MS))
     const pages = Array.from(
       { length: Math.min(CONCURRENCY, totalPages - batch) },
       (_, i) => batch + i + 1
@@ -180,42 +182,21 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: `Unknown service: ${service}` }, { status: 400 })
   }
 
-  const proxyBase = process.env.DENTONS_PROXY_URL
-  if (proxyBase) {
-    try {
-      const proxyUrl = `${proxyBase.replace(/\/$/, '')}/api/server-compare?${searchParams.toString()}`
-      const res = await fetch(proxyUrl, { cache: 'no-store', signal: AbortSignal.timeout(120_000), headers: { 'ngrok-skip-browser-warning': 'true' } })
-      const data = await res.json()
-      return NextResponse.json(data, {
-        status: res.status,
-        headers: { 'Cache-Control': 'no-store, no-cache, must-revalidate' },
-      })
-    } catch (err) {
-      console.error('Proxy fetch failed:', err)
-      return NextResponse.json(
-        { error: 'Comparison failed', message: err instanceof Error ? err.message : 'Proxy unreachable' },
-        { status: 502 }
-      )
-    }
-  }
-
   const url1 = `https://${domain1}${servicePath}`
   const url2 = `https://${domain2}${servicePath}`
 
   try {
-    const [first1, first2] = await Promise.all([
-      fetchPage(url1, 1, 1),
-      fetchPage(url2, 1, 1),
-    ])
+    const first1 = await fetchPage(url1, 1, 1)
+    await new Promise(r => setTimeout(r, 300))
+    const first2 = await fetchPage(url2, 1, 1)
 
     const total1 = first1.totalResult as number
     const total2 = first2.totalResult as number
     const diff = total1 - total2
 
-    const [res1, res2] = await Promise.all([
-      fetchAllItems(url1, total1, service),
-      fetchAllItems(url2, total2, service),
-    ])
+    const res1 = await fetchAllItems(url1, total1, service)
+    await new Promise(r => setTimeout(r, 500))
+    const res2 = await fetchAllItems(url2, total2, service)
     const map1 = res1.map
     const map2 = res2.map
 
